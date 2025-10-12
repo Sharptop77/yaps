@@ -39,9 +39,6 @@ go build -o yaps yaps.go
 - Простое добавление новых функций
 - Удобная отладка
 
-## 🔧 Все функции сохранены
-
-Версия в одном файле поддерживает **ВСЕ** функции модульной версии:
 
 ### Базовая функциональность
 - ✅ PID, PPID процессов
@@ -87,7 +84,7 @@ go build -o yaps yaps.go
 ./yaps -c --cpu-interval 500ms --sort-by cpu | head -10
 
 # Анализ памяти
-./yaps -m -f memory>100MB --sort-by memory
+./yaps -m -f "memory>100MB" --sort-by memory
 
 # JSON вывод для автоматизации
 ./yaps --container-only -r -o json > containers.json
@@ -103,7 +100,7 @@ watch -n 2 './yaps -c --cpu-interval 1s --sort-by cpu | head -10'
 
 # Логирование активности
 while true; do
-  echo "$(date): $(./yaps -c -f cpu>10 --sort-by cpu | head -5)"
+  echo "$(date): $(./yaps -c -f "cpu>10" --sort-by cpu | head -5)"
   sleep 30
 done
 ```

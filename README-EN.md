@@ -39,9 +39,6 @@ go build -o yaps yaps.go
 - Simple to add new features
 - Convenient debugging
 
-## 🔧 All Features Preserved
-
-The single-file version supports **ALL** features of the modular version:
 
 ### Basic Functionality
 - ✅ PID, PPID of processes
@@ -87,7 +84,7 @@ The single-file version supports **ALL** features of the modular version:
 ./yaps -c --cpu-interval 500ms --sort-by cpu | head -10
 
 # Memory analysis
-./yaps -m -f memory>100MB --sort-by memory
+./yaps -m -f "memory>100MB" --sort-by memory
 
 # JSON output for automation
 ./yaps --container-only -r -o json > containers.json
@@ -103,7 +100,7 @@ watch -n 2 './yaps -c --cpu-interval 1s --sort-by cpu | head -10'
 
 # Logging activity
 while true; do
-  echo "$(date): $(./yaps -c -f cpu>10 --sort-by cpu | head -5)"
+  echo "$(date): $(./yaps -c -f "cpu>10" --sort-by cpu | head -5)"
   sleep 30
 done
 ```
