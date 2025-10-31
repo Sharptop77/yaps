@@ -266,28 +266,45 @@ func collectSingleProcess(pid int) *Process {
 
 // parseStatFile парсит /proc/[pid]/stat
 func parseStatFile(procPath string, process *Process) error {
-	data, err := os.ReadFile(filepath.Join(procPath, "stat"))
-	if err != nil {
-		return err
-	}
-
-	fields := strings.Fields(string(data))
-	if len(fields) < 24 {
-		return fmt.Errorf("insufficient fields")
-	}
-
-	// PPID (поле 4)
-	if ppid, err := strconv.Atoi(fields[3]); err == nil {
-		process.PPID = ppid
-	}
-
-	// RSS память (поле 24) в страницах
-	if rss, err := strconv.ParseUint(fields[23], 10, 64); err == nil {
-		pageSize := uint64(syscall.Getpagesize())
-		process.MemoryBytes = rss * pageSize
-	}
-
-	return nil
+    data, err := os.ReadFile(filepath.Join(procPath, "stat"))
+    if err != nil {
+        return err
+    }
+    
+    statStr := string(data)
+    
+    // Находим последнюю закрывающую скобку имени процесса
+    // Формат: PID (имя процесса) остальные поля
+    lastParen := strings.LastIndex(statStr, ")")
+    if lastParen == -1 {
+        return fmt.Errorf("invalid stat format")
+    }
+    
+    // Берем часть после закрывающей скобки
+    fieldsStr := strings.TrimSpace(statStr[lastParen+1:])
+    fields := strings.Fields(fieldsStr)
+    
+    // Теперь правильная нумерация (начинается с state):
+    // fields[0] = state (S, R, D, ...)
+    // fields[1] = ppid
+    // fields[21] = rss
+    
+    if len(fields) < 22 {
+        return fmt.Errorf("insufficient fields")
+    }
+    
+    // PPID (поле 1 после имени)
+    if ppid, err := strconv.Atoi(fields[1]); err == nil {
+        process.PPID = ppid
+    }
+    
+    // RSS память (поле 21 после имени) в страницах
+    if rss, err := strconv.ParseUint(fields[21], 10, 64); err == nil {
+        pageSize := uint64(syscall.Getpagesize())
+        process.MemoryBytes = rss * pageSize
+    }
+    
+    return nil
 }
 
 // parseStatusFile парсит /proc/[pid]/status
@@ -400,57 +417,64 @@ func calculateCPUUsage(process *Process) {
 
 // readProcessCPUStats читает CPU статистики процесса (ИСПРАВЛЕННАЯ ВЕРСИЯ)
 func readProcessCPUStats(pid int) (CPUStats, error) {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-	if err != nil {
-		return CPUStats{}, err
-	}
-
-	fields := strings.Fields(string(data))
-	if len(fields) < 22 {
-		return CPUStats{}, fmt.Errorf("insufficient fields")
-	}
-
-	// Поля из /proc/[pid]/stat (нумерация с 1):
-	// 14: utime - пользовательское время (индекс 13)
-	// 15: stime - системное время (индекс 14)
-	// 16: cutime - время дочерних процессов пользовательское (индекс 15)
-	// 17: cstime - время дочерних процессов системное (индекс 16) 
-	// 22: starttime - время запуска (индекс 21)
-
-	utime, err := strconv.ParseUint(fields[13], 10, 64)
-	if err != nil {
-		return CPUStats{}, fmt.Errorf("failed to parse utime: %w", err)
-	}
-
-	stime, err := strconv.ParseUint(fields[14], 10, 64)
-	if err != nil {
-		return CPUStats{}, fmt.Errorf("failed to parse stime: %w", err)
-	}
-
-	var cutime, cstime, starttime uint64
-
-	// cutime и cstime (дочерние процессы)
-	if len(fields) > 15 {
-		cutime, _ = strconv.ParseUint(fields[15], 10, 64)
-	}
-	if len(fields) > 16 {
-		cstime, _ = strconv.ParseUint(fields[16], 10, 64)
-	}
-
-	// starttime
-	if len(fields) > 21 {
-		starttime, _ = strconv.ParseUint(fields[21], 10, 64)
-	}
-
-	return CPUStats{
-		PID:       pid,
-		UTime:     utime,
-		STime:     stime,
-		CUTime:    cutime,
-		CSTime:    cstime,
-		StartTime: starttime,
-		Timestamp: time.Now(),
-	}, nil
+    data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+    if err != nil {
+        return CPUStats{}, err
+    }
+    
+    statStr := string(data)
+    
+    // Находим последнюю закрывающую скобку имени процесса
+    lastParen := strings.LastIndex(statStr, ")")
+    if lastParen == -1 {
+        return CPUStats{}, fmt.Errorf("invalid stat format")
+    }
+    
+    // Берем часть после закрывающей скобки
+    fieldsStr := strings.TrimSpace(statStr[lastParen+1:])
+    fields := strings.Fields(fieldsStr)
+    
+    // Правильная нумерация после имени процесса:
+    // fields[11] = utime
+    // fields[12] = stime
+    // fields[13] = cutime
+    // fields[14] = cstime
+    // fields[19] = starttime
+    
+    if len(fields) < 20 {
+        return CPUStats{}, fmt.Errorf("insufficient fields")
+    }
+    
+    utime, err := strconv.ParseUint(fields[11], 10, 64)
+    if err != nil {
+        return CPUStats{}, fmt.Errorf("failed to parse utime: %w", err)
+    }
+    
+    stime, err := strconv.ParseUint(fields[12], 10, 64)
+    if err != nil {
+        return CPUStats{}, fmt.Errorf("failed to parse stime: %w", err)
+    }
+    
+    var cutime, cstime, starttime uint64
+    if len(fields) > 13 {
+        cutime, _ = strconv.ParseUint(fields[13], 10, 64)
+    }
+    if len(fields) > 14 {
+        cstime, _ = strconv.ParseUint(fields[14], 10, 64)
+    }
+    if len(fields) > 19 {
+        starttime, _ = strconv.ParseUint(fields[19], 10, 64)
+    }
+    
+    return CPUStats{
+        PID:       pid,
+        UTime:     utime,
+        STime:     stime,
+        CUTime:    cutime,
+        CSTime:    cstime,
+        StartTime: starttime,
+        Timestamp: time.Now(),
+    }, nil
 }
 
 // cleanupCPUStats очищает старые CPU статистики
