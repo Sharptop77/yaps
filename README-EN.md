@@ -1,97 +1,90 @@
-# yaps
+# YAPS — Advanced Process and Container Monitor for Linux and Kubernetes (RKE2)
 
-Yet another ps utility
+## Program Description and Capabilities
 
-## 🚀 Quick Installation
+**YAPS** (Yet Another Process Scanner) — a high-performance CLI utility for monitoring processes and containers on Linux, specifically designed for Kubernetes clusters (especially RKE2/k3s) and virtual/physical servers. The utility provides deep integration with Kubernetes and container environments, identifies process container and pod membership, and supports intelligent filtering and extended output formats (table, JSON, YAML).
 
-### Requirements
-- Go 1.21+
-- Linux system
-- Access to the `/proc` filesystem
+### Advantages Compared to Analogues (`top`, `htop`, `glances`, `btop`, etc.)
 
-### Installation in 3 Commands
+- **Deep Container Integration:** Unlike classical process monitoring tools, it recognizes Docker, containerd, LXC, systemd-nspawn, and Kubernetes containers via crictl/kubelet.
+- **Kubernetes-Aware:** Shows namespace, pod, pod UID, QoS class, container name for each process.
+- **Advanced Filtering:** Ability to display only processes from specific namespaces, pods, or containers; filter by users, PIDs, resource conditions.
+- **Extended Output:** Large number of output options (CPU, memory, swap, command, user, container, Kubernetes fields).
+- **Data Export:** Convenient export in JSON, YAML format for subsequent automated processing and integration with DevOps/Monitoring pipelines.
+- **CLI Interface Based on Cobra:** Easy integration into CI/CD, automation, scripts.
+- **High Performance:** Project optimized for analyzing large volumes of processes and working under high load.
+- **Easy Adaptation in Kubernetes, RKE2, k3s, OpenShift Infrastructure.**
+
+## Building the Application
+
+### Dependencies
+
+- Go 1.19+
+- crictl (for Kubernetes integration)
+- For Docker: permissions for /var/run/docker.sock (if docker containers are being monitored)
+
+### How to Build
+
 ```bash
-# 1. Download dependencies
-go mod download
-
-# 2. Build
+git clone https://github.com/Sharptop77/yaps.git
+cd yaps
 go build -o yaps yaps.go
+```
 
-# 3. Run
+## Quick Start and Usage Examples
+
+### Running
+
+```bash
 ./yaps
 ```
 
-## 📁 Single File Advantages
+Will output a detailed table of all processes with container and Kubernetes information (if detected).
 
-### ✅ Easy Deployment
-- One file, `yaps.go`, contains all the code
-- Minimal dependencies (only 3 external libraries)
-- Fast compilation (~2-3 seconds)
-- Easily integrates into existing projects
+### Main Parameters
 
-### ✅ Portability
-- Copy `yaps.go` to any Linux machine
-- No complex directory structure required
-- Works in any directory
+- `--show-cpu`, `-c` — Show CPU
+- `--show-mem`, `-m` — Show memory
+- `--show-swap`, `-s` — Show swap
+- `--show-cmd`, `-C` — Command line
+- `--show-user`, `-u` — User
+- `--show-container` — Container process indicator
+- `--container-id` — Container ID
+- `--container-name` — Container name
+- `--show-k8s` — Kubernetes namespace, pod, QoS
+- `--k8s-only` — Only processes from Kubernetes pods
+- `--k8s-namespace=ns` — Only processes in namespace ns
+- `--output table|json|yaml` — Output format
+- `--sort-by=field` — Sort by field
+- `--cpu-interval=1s` — CPU measurement interval
+- `--container-only` — Only container processes
+- `--pid`, `--user`, `--set-filter` — Filters by PID, users, resources
 
-### ✅ Easy Modification
-- All code in one place
-- Simple to add new features
-- Convenient debugging
+### Example Scenarios
 
+- Only processes in Kubernetes namespace:
+  ```bash
+  ./yaps --k8s-namespace default --show-cpu --show-mem --show-k8s
+  ```
+- Only container processes:
+  ```bash
+  ./yaps --container-only --show-container --output json
+  ```
+- Usage in scripts:
+  ```bash
+  ./yaps --output json | jq '.[] | select(.cpu_percent > 10.0)'
+  ```
 
-### Basic Functionality
-- ✅ PID, PPID of processes
-- ✅ CPU utilization with configurable interval (`--cpu-interval`)
-- ✅ Memory and swap usage
-- ✅ Command lines for processes
-- ✅ Users (correctly shows root for UID 0)
+### Integration
 
-### Containers
-- ✅ Detection of Docker, LXC, systemd containers
-- ✅ Container IDs and names via Docker API
-- ✅ Filtering for container-only processes
+- Use in cron/systemd to collect metrics on schedule.
+- Embed in Ansible, CI/CD pipelines, monitoring systems to get fresh snapshots.
+- Export output in JSON/YAML for subsequent visualization or alerting.
 
-### Filtering and Sorting
-- ✅ Filters by PID, user, resources
-- ✅ Sorting by any column
-- ✅ Resource filters (`cpu>50`, `memory>1GB`)
+### Output Examples
 
-### Output Formats
-- ✅ Table, JSON, YAML
-- ✅ Adaptive columns
-
-## 🎯 Usage Examples
-
-### Basic Commands
-```bash
-# All processes
-./yaps
-
-# CPU monitoring
-./yaps -c
-
-# Resources (CPU + memory + swap)
-./yaps -r
-
-# Containers
-./yaps --container-only --container-name
-```
-
-### Advanced Examples
-```bash
-# Quick CPU diagnostics
-./yaps -c --cpu-interval 500ms --sort-by cpu | head -10
-
-# Memory analysis
-./yaps -m -f "memory>100MB" --sort-by memory
-
-# JSON output for automation
-./yaps --container-only -r -o json > containers.json
-
-# Processes for a specific user
-./yaps --user root -r --sort-by cpu
-```
+- For Kubernetes processes: fields `k8s_namespace`, `k8s_pod_name`, `k8s_qos_class`
+- Processes from docker/containerd/LXC are highlighted separately
 
 ### Real-time Monitoring
 ```bash
