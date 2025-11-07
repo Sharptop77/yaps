@@ -34,6 +34,12 @@ type Process struct {
 	CPUPercent       float64 `json:"cpu_percent,omitempty" yaml:"cpu_percent,omitempty"`
 	MemoryBytes      uint64  `json:"memory_bytes,omitempty" yaml:"memory_bytes,omitempty"`
 	SwapBytes        uint64  `json:"swap_bytes,omitempty" yaml:"swap_bytes,omitempty"`
+	IOReadBytes      uint64  `json:"io_read_bytes,omitempty" yaml:"io_read_bytes,omitempty"`
+	IOWriteBytes     uint64  `json:"io_write_bytes,omitempty" yaml:"io_write_bytes,omitempty"`
+	IOCancelledBytes uint64  `json:"io_cancelled_bytes,omitempty" yaml:"io_cancelled_bytes,omitempty"`
+	IOReadSpeed      float64 `json:"io_read_speed,omitempty" yaml:"io_read_speed,omitempty"`
+	IOWriteSpeed     float64 `json:"io_write_speed,omitempty" yaml:"io_write_speed,omitempty"`
+	IOCancelledSpeed float64 `json:"io_cancelled_speed,omitempty" yaml:"io_cancelled_speed,omitempty"`
 	CommandLine      string  `json:"command_line,omitempty" yaml:"command_line,omitempty"`
 	Username         string  `json:"username,omitempty" yaml:"username,omitempty"`
 	UID              int     `json:"uid,omitempty" yaml:"uid,omitempty"`
@@ -53,6 +59,7 @@ type Config struct {
 	ShowMemory       bool
 	ShowSwap         bool
 	ShowCommand      bool
+	ShowIO           bool
 	ShowUser         bool
 	ShowContainer    bool
 	ShowContainerID  bool
@@ -101,6 +108,14 @@ type CPUStats struct {
 	CSTime    uint64
 	StartTime uint64
 	Timestamp time.Time
+}
+
+// IOStats хранит IO статистику процесса
+type IOStats struct {
+	ReadBytes      uint64
+	WriteBytes     uint64
+	CancelledBytes uint64
+	Timestamp      time.Time
 }
 
 // K8sPodMetadata содержит метаданные пода из kubelet
@@ -162,6 +177,7 @@ var (
 	containerCache        = make(map[string]string)
 	k8sMetadataCache      = make(map[string]*ContainerInfoExtended)
 	cpuStatsCache         = make(map[int]CPUStats)
+	ioStatsCache          = make(map[int]IOStats)
 	dockerAvailable       bool
 	dockerClient          *http.Client
 	clockTicksPerSec      = 100.0
@@ -477,26 +493,28 @@ func collectProcesses() ([]*Process, error) {
 		}
 	}
 
-	// Второй проход для CPU если нужно
+	// Второй проход для CPU и IO если нужно
 	if needsCPU() {
 		interval := config.CPUInterval
 		if interval == 0 {
 			interval = time.Second
 		}
-
-		fmt.Fprintf(os.Stderr, "Measuring CPU usage (interval: %v)...\n", interval)
+		fmt.Fprintf(os.Stderr, "Measuring CPU and I/O usage for %v...\n", interval)
 		time.Sleep(interval)
 		updated := make([]*Process, 0, len(processes))
 		for _, process := range processes {
 			if processExists(process.PID) {
 				calculateCPUUsage(process)
+				if config.ShowIO || config.ShowAll {
+					calculateIOSpeed(process)
+				}
 				updated = append(updated, process)
 			}
 		}
 		processes = updated
 		cleanupCPUStats(pidList)
+		cleanupIOStats(pidList)
 	}
-
 	return processes, nil
 }
 
@@ -528,8 +546,9 @@ func collectSingleProcess(pid int) *Process {
 			process.Username = strconv.Itoa(process.UID)
 		}
 	}
-
 	// Контейнер
+	isContainerVal := false
+    process.IsContainer = &isContainerVal
 	if needsContainer() {
 		if info := detectContainerExtended(pid); info != nil {
 			isContainer := true
@@ -554,6 +573,11 @@ func collectSingleProcess(pid int) *Process {
 	// CPU (первое измерение для инициализации)
 	if needsCPU() {
 		calculateCPUUsage(process)
+	}
+
+	// IO
+	if config.ShowIO || config.ShowAll {
+		calculateIOSpeed(process)
 	}
 
 	return process
@@ -686,6 +710,63 @@ func calculateCPUUsage(process *Process) {
 	cpuStatsCache[process.PID] = current
 }
 
+// calculateIOSpeed рассчитывает скорость IO в байт/сек
+func calculateIOSpeed(process *Process) {
+	// Читаем текущие IO данные
+	current, err := readProcessIOStats(process.PID)
+	if err != nil {
+		return
+	}
+
+	// Сохраняем абсолютные значения
+	process.IOReadBytes = current.ReadBytes
+	process.IOWriteBytes = current.WriteBytes
+	process.IOCancelledBytes = current.CancelledBytes
+
+	// Получаем предыдущие данные из кеша
+	prev, exists := ioStatsCache[process.PID]
+	if !exists {
+		// Первое измерение - записываем и выходим
+		ioStatsCache[process.PID] = current
+		process.IOReadSpeed = 0.0
+		process.IOWriteSpeed = 0.0
+		process.IOCancelledSpeed = 0.0
+		return
+	}
+
+	// Рассчитываем временной интервал
+	timeDelta := current.Timestamp.Sub(prev.Timestamp).Seconds()
+	if timeDelta < 0.01 {
+		process.IOReadSpeed = 0.0
+		process.IOWriteSpeed = 0.0
+		process.IOCancelledSpeed = 0.0
+		return
+	}
+
+	// Рассчитываем скорость в байт/сек
+	readDelta := float64(int64(current.ReadBytes) - int64(prev.ReadBytes))
+	writeDelta := float64(int64(current.WriteBytes) - int64(prev.WriteBytes))
+	cancelledDelta := float64(int64(current.CancelledBytes) - int64(prev.CancelledBytes))
+
+	process.IOReadSpeed = readDelta / timeDelta
+	process.IOWriteSpeed = writeDelta / timeDelta
+	process.IOCancelledSpeed = cancelledDelta / timeDelta
+
+	// Защита от отрицательных значений (может быть сброс счетчиков)
+	if process.IOReadSpeed < 0 {
+		process.IOReadSpeed = 0
+	}
+	if process.IOWriteSpeed < 0 {
+		process.IOWriteSpeed = 0
+	}
+	if process.IOCancelledSpeed < 0 {
+		process.IOCancelledSpeed = 0
+	}
+
+	// Сохраняем текущие данные
+	ioStatsCache[process.PID] = current
+}
+
 // readProcessCPUStats читает CPU статистики процесса
 func readProcessCPUStats(pid int) (CPUStats, error) {
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
@@ -733,6 +814,45 @@ func readProcessCPUStats(pid int) (CPUStats, error) {
 	}, nil
 }
 
+// readProcessIOStats читает IO статистику из /proc/[pid]/io
+func readProcessIOStats(pid int) (IOStats, error) {
+	file, err := os.Open(filepath.Join(fmt.Sprintf("/proc/%d", pid), "io"))
+	if err != nil {
+		return IOStats{}, err
+	}
+	defer file.Close()
+
+	stats := IOStats{
+		Timestamp: time.Now(),
+	}
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+
+		switch fields[0] {
+		case "read_bytes:":
+			if val, err := strconv.ParseUint(fields[1], 10, 64); err == nil {
+				stats.ReadBytes = val
+			}
+		case "write_bytes:":
+			if val, err := strconv.ParseUint(fields[1], 10, 64); err == nil {
+				stats.WriteBytes = val
+			}
+		case "cancelled_write_bytes:":
+			if val, err := strconv.ParseUint(fields[1], 10, 64); err == nil {
+				stats.CancelledBytes = val
+			}
+		}
+	}
+
+	return stats, nil
+}
+
 // cleanupCPUStats очищает старые CPU статистики
 func cleanupCPUStats(activePIDs []int) {
 	activeMap := make(map[int]bool)
@@ -743,6 +863,20 @@ func cleanupCPUStats(activePIDs []int) {
 	for pid := range cpuStatsCache {
 		if !activeMap[pid] {
 			delete(cpuStatsCache, pid)
+		}
+	}
+}
+
+// cleanupIOStats удаляет IO статистику неактивных процессов
+func cleanupIOStats(activePIDs []int) {
+	activeMap := make(map[int]bool)
+	for _, pid := range activePIDs {
+		activeMap[pid] = true
+	}
+
+	for pid := range ioStatsCache {
+		if !activeMap[pid] {
+			delete(ioStatsCache, pid)
 		}
 	}
 }
@@ -766,7 +900,14 @@ func detectContainerExtended(pid int) *ContainerInfoExtended {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-
+		// == Приоритет 0: исключить обычные пользовательские процессы
+		if strings.Contains(line, "user.slice") || 
+		strings.Contains(line, "session.slice") ||
+		(strings.Contains(line, "app.slice") && !strings.Contains(line, "kubepods")) {
+			// Это обычный пользовательский процесс, а не контейнер
+			continue
+		}
+    
 		// === Приоритет 1: KUBERNETES + containerd (systemd) ===
 		if info := extractK8sContainerdSystemd(line); info != nil {
 			// Пытаемся получить полное имя контейнера из crictl
@@ -1229,15 +1370,35 @@ func extractLXCName(line string) string {
 	return ""
 }
 
-// extractSystemdContainer извлекает systemd контейнер
+// extractSystemdContainer извлекает systemd контейнер - более строгое совпадение
 func extractSystemdContainer(line string) string {
-	re := regexp.MustCompile(`machine-([^.]+)\.scope`)
-	if matches := re.FindStringSubmatch(line); len(matches) > 1 {
-		return matches[1]
-	}
-
-	return ""
+    // Исключить userspace
+    if strings.Contains(line, "user.slice") {
+        return ""
+    }
+    
+    // Исключить app.slice (приложения пользователя в systemd)
+    if strings.Contains(line, "app.slice") && !strings.Contains(line, "kubepods") {
+        return ""
+    }
+    
+    // Исключить session.slice
+    if strings.Contains(line, "session.slice") {
+        return ""
+    }
+    
+    // Только реальные systemd машины (systemd-nspawn контейнеры)
+    // Они находятся в system.slice/machine-xxx.scope или в другом корневом пути
+    if strings.Contains(line, "system.slice") && strings.Contains(line, "machine-") {
+        re := regexp.MustCompile(`machine-[^/]+\.scope`)
+        if matches := re.FindStringSubmatch(line); matches != nil && len(matches) > 0 {
+            return matches[0]
+        }
+    }
+    
+    return ""
 }
+
 
 // getDockerContainerName получает имя Docker контейнера
 func getDockerContainerName(containerID string) string {
@@ -1319,6 +1480,9 @@ func shouldIncludeProcess(process *Process) bool {
 		if process.IsContainer == nil || !*process.IsContainer {
 			return false
 		}
+	    if process.ContainerID == "" {  
+    	    return false
+    }
 	}
 
 	// Фильтр Kubernetes
@@ -1424,6 +1588,15 @@ func matchesSingleResourceFilter(process *Process, filter string) bool {
 		return process.MemoryBytes > 0
 	case "swap":
 		return process.SwapBytes > 0
+
+	case "io_read":
+		return process.IOReadSpeed > 0
+
+	case "io_write":
+		return process.IOWriteSpeed > 0
+
+	case "io_cancel":
+		return process.IOCancelledSpeed > 0
 	}
 
 	operators := []string{">=", "<=", ">", "<", "="}
@@ -1451,6 +1624,12 @@ func evaluateResourceCondition(process *Process, resource, operator, valueStr st
 		actualValue = float64(process.MemoryBytes)
 	case "swap":
 		actualValue = float64(process.SwapBytes)
+	case "io_read":
+		return process.IOReadSpeed > 0
+	case "io_write":
+		return process.IOWriteSpeed > 0
+	case "io_cancel":
+		return process.IOCancelledSpeed > 0
 	default:
 		return false
 	}
@@ -1547,6 +1726,20 @@ func sortProcesses(processes []*Process) error {
 		sort.Slice(processes, func(i, j int) bool {
 			return processes[i].CommandLine < processes[j].CommandLine
 		})
+	case "io_read":
+		sort.Slice(processes, func(i, j int) bool {
+			return processes[i].IOReadSpeed > processes[j].IOReadSpeed
+		})
+
+	case "io_write":
+		sort.Slice(processes, func(i, j int) bool {
+			return processes[i].IOWriteSpeed > processes[j].IOWriteSpeed
+		})
+
+	case "io_cancel":
+		sort.Slice(processes, func(i, j int) bool {
+			return processes[i].IOCancelledSpeed > processes[j].IOCancelledSpeed
+		})	
 	default:
 		return fmt.Errorf("unsupported sort field: %s", sortBy)
 	}
@@ -1588,6 +1781,10 @@ func formatTable(processes []*Process) error {
 		headers = append(headers, "SWAP")
 	}
 
+	if config.ShowIO || config.ShowAll {
+		headers = append(headers, "IO_R/s", "IO_W/s", "IO_C/s")
+	}
+
 	if config.ShowUser || config.ShowAll {
 		headers = append(headers, "USER")
 	}
@@ -1596,15 +1793,15 @@ func formatTable(processes []*Process) error {
 		headers = append(headers, "CONTAINER")
 	}
 
-	if config.ShowContainerID || config.ShowAll {
+	if config.ShowContainerID || config.ContainerOnly {
 		headers = append(headers, "CONTAINER_ID")
 	}
 
-	if config.ShowContainerName || config.ShowAll {
+	if config.ShowContainerName || config.ContainerOnly {
 		headers = append(headers, "CONTAINER_NAME")
 	}
 
-	if config.ShowKubernetes || config.ShowAll {
+	if config.ShowKubernetes || config.K8sOnly {
 		headers = append(headers, "K8S_NS", "K8S_POD", "K8S_QOS")
 	}
 
@@ -1639,6 +1836,12 @@ func formatTable(processes []*Process) error {
 			row = append(row, formatBytes(process.SwapBytes))
 		}
 
+		if config.ShowIO || config.ShowAll {
+			row = append(row, formatBytes(uint64(process.IOReadSpeed))+"/s")
+			row = append(row, formatBytes(uint64(process.IOWriteSpeed))+"/s")
+			row = append(row, formatBytes(uint64(process.IOCancelledSpeed))+"/s")
+		}
+
 		if config.ShowUser || config.ShowAll {
 			user := process.Username
 			if user == "" {
@@ -1660,7 +1863,7 @@ func formatTable(processes []*Process) error {
 			}
 		}
 
-		if config.ShowContainerID || config.ShowAll {
+		if config.ShowContainerID || config.ContainerOnly {
 			if process.ContainerID != "" {
 				row = append(row, process.ContainerID)
 			} else {
@@ -1668,7 +1871,7 @@ func formatTable(processes []*Process) error {
 			}
 		}
 
-		if config.ShowContainerName || config.ShowAll {
+		if config.ShowContainerName || config.ContainerOnly {
 			if process.ContainerName != "" {
 				row = append(row, process.ContainerName)
 			} else {
@@ -1676,7 +1879,7 @@ func formatTable(processes []*Process) error {
 			}
 		}
 
-		if config.ShowKubernetes || config.ShowAll {
+		if config.ShowKubernetes ||  config.K8sOnly {
 			ns := process.K8sNamespace
 			if ns == "" {
 				ns = "-"
@@ -1785,6 +1988,16 @@ func filterFieldsForOutput(processes []*Process) []map[string]interface{} {
 			}
 		}
 
+		if config.ShowIO || config.ShowAll {
+			item["io_read_bytes"] = process.IOReadBytes
+			item["io_write_bytes"] = process.IOWriteBytes
+			item["io_cancelled_bytes"] = process.IOCancelledBytes
+			item["io_read_speed"] = process.IOReadSpeed
+			item["io_write_speed"] = process.IOWriteSpeed
+			item["io_cancelled_speed"] = process.IOCancelledSpeed
+		}
+
+
 		if config.ShowCommand || config.ShowAll {
 			item["command_line"] = process.CommandLine
 		}
@@ -1831,13 +2044,15 @@ func needsCPU() bool {
 	if config.ShowCPU || config.ShowAll {
 		return true
 	}
-
+	if config.ShowIO || config.ShowAll {
+		return true
+	}
 	for _, filter := range config.ResourceFilter {
-		if strings.Contains(strings.ToLower(filter), "cpu") {
+		filterLower := strings.ToLower(filter)
+		if strings.Contains(filterLower, "cpu") || strings.Contains(filterLower, "io_") {
 			return true
 		}
 	}
-
 	return false
 }
 
@@ -1867,6 +2082,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVarP(&config.ShowCPU, "show-cpu", "c", false, "Show CPU utilization")
 	rootCmd.PersistentFlags().BoolVarP(&config.ShowMemory, "show-mem", "m", false, "Show memory usage")
 	rootCmd.PersistentFlags().BoolVarP(&config.ShowSwap, "show-swap", "s", false, "Show swap usage")
+	rootCmd.PersistentFlags().BoolVarP(&config.ShowIO, "show-io", "i", false, "Show I/O statistics")
 	rootCmd.PersistentFlags().BoolVarP(&config.ShowCommand, "show-cmd", "C", false, "Show command line")
 	rootCmd.PersistentFlags().BoolVarP(&config.ShowUser, "show-user", "u", false, "Show user")
 	rootCmd.PersistentFlags().BoolVarP(&resourcesFlag, "resources", "r", false, "Show CPU, memory, and swap")
@@ -1890,6 +2106,7 @@ func init() {
 			config.ShowCPU = true
 			config.ShowMemory = true
 			config.ShowSwap = true
+			config.ShowIO = true
 		}
 
 		if config.CPUInterval < 100*time.Millisecond {
@@ -1902,7 +2119,7 @@ func init() {
 			config.CPUInterval = 10 * time.Second
 		}
 
-		if !config.ShowCPU && !config.ShowMemory && !config.ShowSwap &&
+		if !config.ShowCPU && !config.ShowMemory && !config.ShowSwap && !config.ShowIO &&
 			!config.ShowCommand && !config.ShowUser && !config.ShowContainer &&
 			!config.ShowContainerID && !config.ShowContainerName && !config.ShowKubernetes {
 			config.ShowAll = true
@@ -1913,7 +2130,7 @@ func init() {
 		Use:   "version",
 		Short: "Print version information",
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Println("yaps - Process Monitor v1.1.0 (with crictl CRI integration and Kubernetes RKE2 support)")
+			fmt.Println("yaps - Process Monitor v1.2.0 (with crictl CRI integration and Kubernetes RKE2 support)")
 		},
 	}
 
